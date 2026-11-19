@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Tab Audio Sentinel",
-  "version": "1.2.0",
-  "description": "Automatically pauses competing tab media and lets you manage playback.",
+  "name": "Utidio",
+  "version": "1.2.1",
+  "description": "When media starts in one tab, Utidio pauses media in other tabs. Manage playback and daily listening time from one popup.",
   "minimum_chrome_version": "102",
   "permissions": [
     "tabs",
@@ -15,6 +15,7 @@
     "service_worker": "background.js"
   },
   "action": {
+    "default_title": "Utidio — One plays, others pause",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",

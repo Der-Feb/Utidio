@@ -137,7 +137,7 @@
   }
 
   function render() {
-    modeLabel.textContent = state.enabled ? 'Automatic pausing is on' : 'Automatic pausing is off';
+    modeLabel.textContent = state.enabled ? 'Auto-pause is on' : 'Auto-pause is off';
     playingList.replaceChildren();
     pausedList.replaceChildren();
 

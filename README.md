@@ -1,6 +1,6 @@
-# Tab Audio Sentinel
+# Utidio
 
-Tab Audio Sentinel automatically pauses ordinary HTML audio and video in other tabs when playback starts. Its popup lists playing and paused media tabs and lets you resume or pause media, switch to a tab, and turn automatic pausing off or on.
+Utidio follows the rule “One plays. Others pause.” When media starts in one tab, it automatically pauses ordinary HTML audio and video in other tabs. Its popup lists playing and paused media tabs, lets you control playback, and shows daily listening time.
 
 ## Install locally
 
