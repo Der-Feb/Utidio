@@ -9,5 +9,7 @@ globalThis.TAB_AUDIO_SENTINEL = globalThis.TAB_AUDIO_SENTINEL || Object.freeze({
   storageKeys: Object.freeze({
     ENABLED: 'enabled',
     MEDIA_TABS: 'mediaTabs',
+    DAILY_LISTENING: 'dailyListeningMs',
   }),
+  listeningAlarm: 'listening-checkpoint',
 });

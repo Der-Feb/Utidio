@@ -11,11 +11,14 @@ Tab Audio Sentinel automatically pauses ordinary HTML audio and video in other t
 
 The extension also scans already-open, accessible tabs on install and whenever automatic pausing is enabled again. If more than one tab is already playing, it keeps the active tab playing when possible; otherwise it keeps the most recently observed playing tab. It does not automatically resume a tab when another one pauses or ends.
 
+The popup’s **Listening time** view shows daily wall-clock totals. Overlapping playback counts once, totals use the computer’s local date, and media titles are not stored in the history. The extension checkpoints an active listening interval about once a minute.
+
 ## Permissions
 
 - `tabs` reads tab titles, URLs, favicons, audibility, and tab lifecycle events for the popup and playback coordination.
 - `scripting` checks and controls media in open tabs, including tabs that were already open when the extension was installed or enabled.
 - `storage` preserves the enabled setting and the current browser-session media list across service-worker restarts.
+- `alarms` checkpoints listening time while media remains active, even when the service worker is idle.
 - The `<all_urls>` content-script match allows detection and control on ordinary websites and embedded frames. Chrome-managed pages and other restricted pages cannot be inspected.
 
 ## Limits

@@ -5,8 +5,13 @@
   const notice = document.getElementById('notice');
   const playingList = document.getElementById('playing-list');
   const pausedList = document.getElementById('paused-list');
+  const listeningList = document.getElementById('listening-list');
+  const mediaTab = document.getElementById('media-tab');
+  const listeningTab = document.getElementById('listening-tab');
+  const mediaView = document.getElementById('media-view');
+  const listeningView = document.getElementById('listening-view');
 
-  let state = { enabled: true, mediaTabs: [] };
+  let state = { enabled: true, mediaTabs: [], listeningByDay: {} };
 
   function send(message) {
     return new Promise((resolve) => {
@@ -27,9 +32,14 @@
       setNotice(response?.error || 'Could not read media status. Try reopening this popup.');
       return;
     }
-    state = { enabled: response.enabled, mediaTabs: response.mediaTabs || [] };
+    state = {
+      enabled: response.enabled,
+      mediaTabs: response.mediaTabs || [],
+      listeningByDay: response.listeningByDay || {},
+    };
     toggle.checked = state.enabled;
     render();
+    renderListeningTime();
     setNotice('');
   }
 
@@ -142,6 +152,70 @@
     else pausedList.append(makeEmpty('Paused media tabs will appear here.'));
   }
 
+  function localTodayKey() {
+    const date = new Date();
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+
+  function formatDuration(milliseconds) {
+    const totalSeconds = Math.floor(milliseconds / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  function renderListeningTime() {
+    listeningList.replaceChildren();
+    const dailyTotals = state.listeningByDay || {};
+    const days = new Set([...Object.keys(dailyTotals), localTodayKey()]);
+    const orderedDays = [...days].sort((a, b) => b.localeCompare(a));
+
+    for (const day of orderedDays) {
+      const row = document.createElement('div');
+      row.className = 'listening-row';
+      const date = new Date(`${day}T12:00:00`);
+      const dateLabel = document.createElement('span');
+      dateLabel.className = 'listening-date';
+      dateLabel.textContent = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date)
+        + (day === localTodayKey() ? ' · Today' : '');
+      const duration = document.createElement('time');
+      duration.className = 'listening-duration';
+      const totalSeconds = Math.floor((dailyTotals[day] || 0) / 1000);
+      duration.dateTime = `PT${Math.floor(totalSeconds / 3600)}H${Math.floor((totalSeconds % 3600) / 60)}M${totalSeconds % 60}S`;
+      duration.textContent = formatDuration(dailyTotals[day] || 0);
+      row.append(dateLabel, duration);
+      listeningList.append(row);
+    }
+  }
+
+  function showView(view) {
+    const showingListening = view === 'listening';
+    mediaTab.setAttribute('aria-selected', String(!showingListening));
+    listeningTab.setAttribute('aria-selected', String(showingListening));
+    mediaTab.tabIndex = showingListening ? -1 : 0;
+    listeningTab.tabIndex = showingListening ? 0 : -1;
+    mediaView.hidden = showingListening;
+    listeningView.hidden = !showingListening;
+    if (showingListening) void refresh();
+  }
+
+  mediaTab.addEventListener('click', () => showView('media'));
+  listeningTab.addEventListener('click', () => showView('listening'));
+  for (const [tab, view] of [[mediaTab, 'media'], [listeningTab, 'listening']]) {
+    tab.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        const nextView = view === 'media' ? 'listening' : 'media';
+        showView(nextView);
+        (nextView === 'media' ? mediaTab : listeningTab).focus();
+      }
+    });
+  }
+  setInterval(() => {
+    if (!listeningView.hidden) void refresh();
+  }, 10000);
+
   toggle.addEventListener('change', async () => {
     const desired = toggle.checked;
     toggle.disabled = true;
@@ -167,6 +241,10 @@
       state.enabled = changes.enabled.newValue;
       toggle.checked = state.enabled;
       render();
+    }
+    if (areaName === 'local' && changes.dailyListeningMs) {
+      state.listeningByDay = changes.dailyListeningMs.newValue || {};
+      renderListeningTime();
     }
   });
 

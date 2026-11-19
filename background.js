@@ -3,10 +3,13 @@ let mediaTabs = {};
 let activeTabId = null;
 let ready;
 let stateWrites = Promise.resolve();
+let dailyListeningMs = {};
+let listeningSince = null;
 
 importScripts('constants.js');
 const ACTIONS = TAB_AUDIO_SENTINEL.actions;
 const STORAGE_KEYS = TAB_AUDIO_SENTINEL.storageKeys;
+const LISTENING_ALARM = TAB_AUDIO_SENTINEL.listeningAlarm;
 
 function persistMediaTabs() {
   stateWrites = stateWrites
@@ -17,11 +20,14 @@ function persistMediaTabs() {
 
 async function initializeState() {
   const [settings, session] = await Promise.all([
-    chrome.storage.local.get(STORAGE_KEYS.ENABLED),
-    chrome.storage.session.get(STORAGE_KEYS.MEDIA_TABS),
+    chrome.storage.local.get([STORAGE_KEYS.ENABLED, STORAGE_KEYS.DAILY_LISTENING]),
+    chrome.storage.session.get([STORAGE_KEYS.MEDIA_TABS, 'listeningSince']),
   ]);
   enabled = settings[STORAGE_KEYS.ENABLED] ?? true;
+  dailyListeningMs = settings[STORAGE_KEYS.DAILY_LISTENING] ?? {};
   mediaTabs = session[STORAGE_KEYS.MEDIA_TABS] ?? {};
+  listeningSince = session.listeningSince ?? null;
+  if (listeningSince !== null) chrome.alarms.create(LISTENING_ALARM, { periodInMinutes: 1 });
   const playing = Object.values(mediaTabs).filter((tab) => tab.isPlaying);
   if (playing.length) {
     activeTabId = playing.reduce((latest, tab) =>
@@ -33,7 +39,70 @@ async function initializeState() {
 ready = initializeState().then(refreshOpenTabs);
 
 function tabIsPlaying(tab) {
-  return Boolean(tab && (tab.isAudible || Object.values(tab.frames || {}).some((frame) => frame.isPlaying)));
+  if (!tab) return false;
+  const frameIsPlaying = Object.values(tab.frames || {}).some((frame) => frame.isPlaying);
+  if (tab.pauseRequestedUntil && Date.now() <= tab.pauseRequestedUntil && !frameIsPlaying) return false;
+  return Boolean(tab.isAudible || frameIsPlaying);
+}
+
+function anyTabIsPlaying() {
+  return Object.values(mediaTabs).some(tabIsPlaying);
+}
+
+function localDateKey(timestamp) {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function addListeningInterval(totals, start, end) {
+  let cursor = start;
+  while (cursor < end) {
+    const date = new Date(cursor);
+    const nextDay = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime();
+    const segmentEnd = Math.min(end, nextDay);
+    const key = localDateKey(cursor);
+    totals[key] = (totals[key] || 0) + segmentEnd - cursor;
+    cursor = segmentEnd;
+  }
+}
+
+async function syncListeningClock(timestamp = Date.now()) {
+  const playing = anyTabIsPlaying();
+  if (playing && listeningSince === null) {
+    listeningSince = timestamp;
+    await chrome.storage.session.set({ listeningSince });
+    chrome.alarms.create(LISTENING_ALARM, { periodInMinutes: 1 });
+  } else if (!playing && listeningSince !== null) {
+    addListeningInterval(dailyListeningMs, listeningSince, timestamp);
+    listeningSince = null;
+    await Promise.all([
+      chrome.storage.session.set({ listeningSince: null }),
+      chrome.storage.local.set({ [STORAGE_KEYS.DAILY_LISTENING]: dailyListeningMs }),
+    ]);
+    chrome.alarms.clear(LISTENING_ALARM);
+  }
+}
+
+async function checkpointListeningClock(timestamp = Date.now()) {
+  if (!anyTabIsPlaying() || listeningSince === null) {
+    await syncListeningClock(timestamp);
+    return;
+  }
+  addListeningInterval(dailyListeningMs, listeningSince, timestamp);
+  listeningSince = timestamp;
+  await Promise.all([
+    chrome.storage.session.set({ listeningSince }),
+    chrome.storage.local.set({ [STORAGE_KEYS.DAILY_LISTENING]: dailyListeningMs }),
+  ]);
+}
+
+function getListeningTotals(now = Date.now()) {
+  const totals = { ...dailyListeningMs };
+  if (listeningSince !== null) addListeningInterval(totals, listeningSince, now);
+  return totals;
 }
 
 function ensureTabRecord(tabId, tab = {}) {
@@ -90,6 +159,7 @@ async function pauseTab(tabId, bySentinel = false) {
     tab.pausedBySentinel = bySentinel;
     Object.values(tab.frames).forEach((frame) => { frame.isPlaying = false; });
     refreshAggregate(tab);
+    await syncListeningClock();
   }
 }
 
@@ -197,6 +267,7 @@ async function refreshOpenTabs() {
   } else if (candidates.length) {
     activeTabId = candidates[0].tabId;
   }
+  await syncListeningClock();
   await persistMediaTabs();
 }
 
@@ -210,7 +281,11 @@ function refreshAggregate(tab) {
 async function handleMessage(message, sender) {
   await ready;
   if (message.action === ACTIONS.GET_STATUS) {
-    return { enabled, mediaTabs: Object.values(mediaTabs) };
+    return {
+      enabled,
+      mediaTabs: Object.values(mediaTabs),
+      listeningByDay: getListeningTotals(),
+    };
   }
   if (message.action === ACTIONS.SET_ENABLED) {
     enabled = Boolean(message.enabled);
@@ -241,6 +316,7 @@ async function handleMessage(message, sender) {
       lastPlayedAt: message.isPlaying && !prior.isPlaying ? Date.now() : (prior.lastPlayedAt || 0),
     };
     refreshAggregate(tab);
+    await syncListeningClock();
     const reportedPlaying = Boolean(message.isPlaying);
     if (reportedPlaying) {
       delete tab.pauseRequestedUntil;
@@ -290,6 +366,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   void ready.then(async () => {
     delete mediaTabs[String(tabId)];
     if (activeTabId === tabId) activeTabId = null;
+    await syncListeningClock();
     await persistMediaTabs();
   });
 });
@@ -300,12 +377,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
     if (changeInfo.status === 'loading') {
       delete mediaTabs[String(tabId)];
       if (activeTabId === tabId) activeTabId = null;
+      await syncListeningClock();
       await persistMediaTabs();
       return;
     }
     if (!tab && changeInfo.audible) tab = ensureTabRecord(tabId, tabInfo);
     if (!tab) {
       if (changeInfo.status === 'complete') await syncOpenTab(tabInfo);
+      await syncListeningClock();
       await persistMediaTabs();
       return;
     }
@@ -313,6 +392,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
       tab.isAudible = changeInfo.audible;
       if (!changeInfo.audible) delete tab.pauseRequestedUntil;
       refreshAggregate(tab);
+      await syncListeningClock();
       const pauseIsPending = tab.pauseRequestedUntil && Date.now() <= tab.pauseRequestedUntil;
       if (changeInfo.audible && tab.isPlaying && enabled && !pauseIsPending) await activateTab(tabId);
       if (!tab.isPlaying && !Object.values(tab.frames).some((frame) => frame.hasMedia)) {
@@ -331,6 +411,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
     if (changeInfo.status === 'complete') {
       await syncOpenTab(tabInfo);
       if (enabled && mediaTabs[String(tabId)]?.isPlaying) await activateTab(tabId);
+      await syncListeningClock();
       await persistMediaTabs();
     }
   });
@@ -342,4 +423,8 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   void ready.then(refreshOpenTabs);
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === LISTENING_ALARM) void ready.then(checkpointListeningClock);
 });

@@ -15,7 +15,7 @@ function assertFile(relativePath) {
 }
 
 assert(manifest.manifest_version === 3, 'Expected a Manifest V3 extension.');
-for (const permission of ['storage', 'scripting', 'tabs']) {
+for (const permission of ['storage', 'scripting', 'tabs', 'alarms']) {
   assert(manifest.permissions.includes(permission), `Missing permission: ${permission}`);
 }
 assert(manifest.host_permissions?.includes('<all_urls>'), 'Expected all-sites access for media detection.');
