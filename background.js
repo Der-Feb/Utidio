@@ -61,19 +61,31 @@ function ensureTabRecord(tabId, tab = {}) {
 }
 
 async function pauseTab(tabId, bySentinel = false) {
+  const tab = mediaTabs[String(tabId)];
+  if (tab && bySentinel) {
+    // Chrome's audible flag can lag a pause; don't let that stale signal
+    // reactivate this tab while the browser catches up.
+    tab.pauseRequestedUntil = Date.now() + 3000;
+    tab.pausedBySentinel = true;
+  }
   try {
     const response = await controlTabMedia(tabId, 'pause');
     if (!response.controlled) {
-      const tab = mediaTabs[String(tabId)];
-      if (tab) tab.controlError = 'Sound detected, but this player cannot be paused by the extension.';
+      if (tab) {
+        delete tab.pauseRequestedUntil;
+        tab.pausedBySentinel = false;
+        tab.controlError = 'Sound detected, but this player cannot be paused by the extension.';
+      }
       return false;
     }
   } catch (error) {
-    const tab = mediaTabs[String(tabId)];
-    if (tab) tab.controlError = 'This tab cannot be controlled. Reload it and try again.';
+    if (tab) {
+      delete tab.pauseRequestedUntil;
+      tab.pausedBySentinel = false;
+      tab.controlError = 'This tab cannot be controlled. Reload it and try again.';
+    }
     return false;
   }
-  const tab = mediaTabs[String(tabId)];
   if (tab) {
     tab.pausedBySentinel = bySentinel;
     Object.values(tab.frames).forEach((frame) => { frame.isPlaying = false; });
@@ -229,11 +241,16 @@ async function handleMessage(message, sender) {
       lastPlayedAt: message.isPlaying && !prior.isPlaying ? Date.now() : (prior.lastPlayedAt || 0),
     };
     refreshAggregate(tab);
-    if (tab.isPlaying) {
+    const reportedPlaying = Boolean(message.isPlaying);
+    if (reportedPlaying) {
+      delete tab.pauseRequestedUntil;
       tab.pausedBySentinel = false;
       tab.controlError = '';
       tab.lastPlayedAt = Math.max(tab.lastPlayedAt || 0, tab.frames[frameId].lastPlayedAt || 0);
       if (enabled) await activateTab(tab.tabId);
+    } else if (tab.pauseRequestedUntil && Date.now() > tab.pauseRequestedUntil) {
+      delete tab.pauseRequestedUntil;
+      tab.pausedBySentinel = false;
     }
     if (!tab.isPlaying && !tab.isAudible && !Object.values(tab.frames).some((frame) => frame.hasMedia)) {
       delete mediaTabs[String(tab.tabId)];
@@ -294,8 +311,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
     }
     if (changeInfo.audible !== undefined) {
       tab.isAudible = changeInfo.audible;
+      if (!changeInfo.audible) delete tab.pauseRequestedUntil;
       refreshAggregate(tab);
-      if (tab.isPlaying && enabled) await activateTab(tabId);
+      const pauseIsPending = tab.pauseRequestedUntil && Date.now() <= tab.pauseRequestedUntil;
+      if (changeInfo.audible && tab.isPlaying && enabled && !pauseIsPending) await activateTab(tabId);
       if (!tab.isPlaying && !Object.values(tab.frames).some((frame) => frame.hasMedia)) {
         delete mediaTabs[String(tabId)];
       }
