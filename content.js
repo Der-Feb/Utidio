@@ -32,6 +32,21 @@
     }
   }
 
+  document.addEventListener('play', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLMediaElement) {
+      try {
+        if (!chrome.runtime?.id) return;
+        chrome.runtime.sendMessage({
+          action: TAB_AUDIO_SENTINEL.actions.PLAY_INTENT,
+          hasUserActivation: Boolean(navigator.userActivation?.isActive),
+        }, () => { void chrome.runtime.lastError; });
+      } catch (error) {
+        // The page may outlive an extension update.
+      }
+    }
+  }, true);
+
   document.addEventListener('playing', report, true);
   for (const eventName of ['pause', 'ended', 'volumechange', 'emptied']) {
     document.addEventListener(eventName, report, true);

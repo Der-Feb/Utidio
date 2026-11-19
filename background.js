@@ -5,6 +5,8 @@ let ready;
 let stateWrites = Promise.resolve();
 let dailyListeningMs = {};
 let listeningSince = null;
+let activePriority = 0;
+let activeIntentAt = 0;
 
 importScripts('constants.js');
 const ACTIONS = TAB_AUDIO_SENTINEL.actions;
@@ -21,12 +23,17 @@ function persistMediaTabs() {
 async function initializeState() {
   const [settings, session] = await Promise.all([
     chrome.storage.local.get([STORAGE_KEYS.ENABLED, STORAGE_KEYS.DAILY_LISTENING]),
-    chrome.storage.session.get([STORAGE_KEYS.MEDIA_TABS, 'listeningSince']),
+    chrome.storage.session.get([STORAGE_KEYS.MEDIA_TABS, 'listeningSince', 'winner']),
   ]);
   enabled = settings[STORAGE_KEYS.ENABLED] ?? true;
   dailyListeningMs = settings[STORAGE_KEYS.DAILY_LISTENING] ?? {};
   mediaTabs = session[STORAGE_KEYS.MEDIA_TABS] ?? {};
   listeningSince = session.listeningSince ?? null;
+  if (session.winner?.tabId !== undefined) {
+    activeTabId = session.winner.tabId;
+    activePriority = session.winner.priority || 0;
+    activeIntentAt = session.winner.intentAt || 0;
+  }
   if (listeningSince !== null) chrome.alarms.create(LISTENING_ALARM, { periodInMinutes: 1 });
   const playing = Object.values(mediaTabs).filter((tab) => tab.isPlaying);
   if (playing.length) {
@@ -190,16 +197,47 @@ async function controlTabMedia(tabId, command) {
   };
 }
 
-async function activateTab(tabId) {
-  if (!enabled) return;
-  const previousId = activeTabId;
-  activeTabId = tabId;
-  if (previousId !== null && previousId !== tabId) {
-    await pauseTab(previousId, true);
+async function activateTab(tabId, priorityOverride, intentAtOverride) {
+  if (!enabled) return false;
+  const tab = mediaTabs[String(tabId)];
+  const priority = priorityOverride ?? (tab?.explicitPlayUntil > Date.now()
+    ? 4
+    : (tab?.playIntentPriority || 1));
+  const intentAt = intentAtOverride ?? tab?.playIntentAt ?? Date.now();
+  const winner = mediaTabs[String(activeTabId)];
+  const winnerStillPlaying = tabIsPlaying(winner);
+  const isCurrentWinner = activeTabId === tabId;
+  const takesPriority = isCurrentWinner || activeTabId === null || !winnerStillPlaying
+    || priority > activePriority || (priority === activePriority && intentAt >= activeIntentAt);
+
+  if (!takesPriority) {
+    if (tabIsPlaying(tab)) await pauseTab(tabId, true);
+    return false;
   }
-  for (const tab of Object.values(mediaTabs)) {
-    if (tab.tabId !== tabId && tab.tabId !== previousId && tabIsPlaying(tab)) await pauseTab(tab.tabId, true);
+
+  if (!isCurrentWinner || priority > activePriority
+    || (priority === activePriority && intentAt > activeIntentAt)) {
+    activeTabId = tabId;
+    activePriority = priority;
+    activeIntentAt = intentAt;
+    await chrome.storage.session.set({ winner: { tabId, priority, intentAt } });
   }
+  for (const otherTab of Object.values(mediaTabs)) {
+    if (otherTab.tabId !== tabId && tabIsPlaying(otherTab)) await pauseTab(otherTab.tabId, true);
+  }
+  return true;
+}
+
+async function getTabPlayIntent(tabId) {
+  const tab = mediaTabs[String(tabId)];
+  if (tab?.explicitPlayUntil > Date.now()) {
+    return { priority: 4, intentAt: tab.playIntentAt || Date.now() };
+  }
+  if (tab?.playIntentAt && Date.now() - tab.playIntentAt < 15 * 60 * 1000) {
+    return { priority: tab.playIntentPriority || 1, intentAt: tab.playIntentAt };
+  }
+  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return { priority: active?.id === tabId ? 3 : 1, intentAt: Date.now() };
 }
 
 function isInjectableUrl(url = '') {
@@ -256,16 +294,17 @@ async function refreshOpenTabs() {
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) await syncOpenTab(tab);
   const candidates = Object.values(mediaTabs).filter(tabIsPlaying);
-  if (enabled && candidates.length > 1) {
+  if (enabled && candidates.length) {
     const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const winner = candidates.find((tab) => tab.tabId === active?.id)
       || candidates.reduce((latest, tab) => (tab.lastPlayedAt || 0) > (latest.lastPlayedAt || 0) ? tab : latest);
     activeTabId = winner.tabId;
+    activePriority = winner.tabId === active?.id ? 3 : (winner.playIntentPriority || 1);
+    activeIntentAt = winner.playIntentAt || winner.lastPlayedAt || Date.now();
     for (const tab of candidates) {
       if (tab.tabId !== winner.tabId) await pauseTab(tab.tabId, true);
     }
-  } else if (candidates.length) {
-    activeTabId = candidates[0].tabId;
+    await chrome.storage.session.set({ winner: { tabId: activeTabId, priority: activePriority, intentAt: activeIntentAt } });
   }
   await syncListeningClock();
   await persistMediaTabs();
@@ -275,7 +314,12 @@ function refreshAggregate(tab) {
   const wasPlaying = tab.isPlaying;
   tab.isPlaying = tabIsPlaying(tab);
   if (tab.isPlaying && !wasPlaying) tab.lastPlayedAt = Date.now();
-  if (!tab.isPlaying && activeTabId === tab.tabId) activeTabId = null;
+  if (!tab.isPlaying && activeTabId === tab.tabId) {
+    activeTabId = null;
+    activePriority = 0;
+    activeIntentAt = 0;
+    void chrome.storage.session.set({ winner: null });
+  }
 }
 
 async function handleMessage(message, sender) {
@@ -299,10 +343,27 @@ async function handleMessage(message, sender) {
         candidates.sort((a, b) => Number(b.tabId === active.id) - Number(a.tabId === active.id));
       }
       activeTabId = candidates[0]?.tabId ?? null;
+      activePriority = candidates.length ? (candidates[0].tabId === active?.id ? 3 : (candidates[0].playIntentPriority || 1)) : 0;
+      activeIntentAt = candidates[0]?.playIntentAt || candidates[0]?.lastPlayedAt || 0;
+      await chrome.storage.session.set({ winner: activeTabId === null ? null : { tabId: activeTabId, priority: activePriority, intentAt: activeIntentAt } });
       for (const tab of candidates.slice(1)) await pauseTab(tab.tabId, true);
     }
     await persistMediaTabs();
     return { success: true, enabled };
+  }
+  if (message.action === ACTIONS.PLAY_INTENT && sender.tab) {
+    const tab = ensureTabRecord(sender.tab.id, sender.tab);
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    tab.playIntentAt = Date.now();
+    tab.playIntentPriority = tab.explicitPlayUntil > Date.now()
+      ? 4
+      : (active?.id === sender.tab.id ? 3 : 2);
+    tab.hasUserActivation = Boolean(message.hasUserActivation);
+    if (enabled && Object.values(tab.frames).some((frame) => frame.isPlaying)) {
+      await activateTab(tab.tabId, tab.playIntentPriority, tab.playIntentAt);
+    }
+    await persistMediaTabs();
+    return { success: true };
   }
   if (message.action === ACTIONS.MEDIA_UPDATE && sender.tab) {
     const tab = ensureTabRecord(sender.tab.id, sender.tab);
@@ -323,7 +384,10 @@ async function handleMessage(message, sender) {
       tab.pausedBySentinel = false;
       tab.controlError = '';
       tab.lastPlayedAt = Math.max(tab.lastPlayedAt || 0, tab.frames[frameId].lastPlayedAt || 0);
-      if (enabled) await activateTab(tab.tabId);
+      if (enabled) {
+        const intent = await getTabPlayIntent(tab.tabId);
+        await activateTab(tab.tabId, intent.priority, intent.intentAt);
+      }
     } else if (tab.pauseRequestedUntil && Date.now() > tab.pauseRequestedUntil) {
       delete tab.pauseRequestedUntil;
       tab.pausedBySentinel = false;
@@ -337,9 +401,17 @@ async function handleMessage(message, sender) {
   if (message.action === ACTIONS.TOGGLE_TAB && Number.isInteger(message.tabId)) {
     const tab = mediaTabs[String(message.tabId)];
     try {
-      const result = await controlTabMedia(message.tabId, tabIsPlaying(tab) ? 'pause' : 'resume');
+      const shouldPause = tabIsPlaying(tab);
+      if (!shouldPause) tab.explicitPlayUntil = Date.now() + 5000;
+      const result = await controlTabMedia(message.tabId, shouldPause ? 'pause' : 'resume');
       if (!result.controlled || !result.success) {
+        if (tab) delete tab.explicitPlayUntil;
         return { success: false, error: result.error || tab?.controlError || 'This player cannot be controlled from the page.' };
+      }
+      if (!shouldPause) {
+        tab.playIntentAt = Date.now();
+        tab.playIntentPriority = 4;
+        await activateTab(message.tabId);
       }
       return { success: true };
     } catch (error) {
@@ -365,7 +437,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   void ready.then(async () => {
     delete mediaTabs[String(tabId)];
-    if (activeTabId === tabId) activeTabId = null;
+    if (activeTabId === tabId) {
+      activeTabId = null;
+      activePriority = 0;
+      activeIntentAt = 0;
+      await chrome.storage.session.set({ winner: null });
+    }
     await syncListeningClock();
     await persistMediaTabs();
   });
@@ -376,7 +453,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
     let tab = mediaTabs[String(tabId)];
     if (changeInfo.status === 'loading') {
       delete mediaTabs[String(tabId)];
-      if (activeTabId === tabId) activeTabId = null;
+      if (activeTabId === tabId) {
+        activeTabId = null;
+        activePriority = 0;
+        activeIntentAt = 0;
+        await chrome.storage.session.set({ winner: null });
+      }
       await syncListeningClock();
       await persistMediaTabs();
       return;
@@ -394,7 +476,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
       refreshAggregate(tab);
       await syncListeningClock();
       const pauseIsPending = tab.pauseRequestedUntil && Date.now() <= tab.pauseRequestedUntil;
-      if (changeInfo.audible && tab.isPlaying && enabled && !pauseIsPending) await activateTab(tabId);
+      if (changeInfo.audible && tab.isPlaying && enabled && !pauseIsPending) {
+        const intent = await getTabPlayIntent(tabId);
+        await activateTab(tabId, intent.priority, intent.intentAt);
+      }
       if (!tab.isPlaying && !Object.values(tab.frames).some((frame) => frame.hasMedia)) {
         delete mediaTabs[String(tabId)];
       }
@@ -410,8 +495,21 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
     }
     if (changeInfo.status === 'complete') {
       await syncOpenTab(tabInfo);
-      if (enabled && mediaTabs[String(tabId)]?.isPlaying) await activateTab(tabId);
+      if (enabled && mediaTabs[String(tabId)]?.isPlaying) {
+        const intent = await getTabPlayIntent(tabId);
+        await activateTab(tabId, intent.priority, intent.intentAt);
+      }
       await syncListeningClock();
+      await persistMediaTabs();
+    }
+  });
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  void ready.then(async () => {
+    const tab = mediaTabs[String(tabId)];
+    if (enabled && tabIsPlaying(tab)) {
+      await activateTab(tabId, 3, Date.now());
       await persistMediaTabs();
     }
   });

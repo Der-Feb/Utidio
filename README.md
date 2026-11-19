@@ -11,6 +11,8 @@ Utidio follows the rule “One plays. Others pause.” When media starts in one 
 
 The extension also scans already-open, accessible tabs on install and whenever automatic pausing is enabled again. If more than one tab is already playing, it keeps the active tab playing when possible; otherwise it keeps the most recently observed playing tab. It does not automatically resume a tab when another one pauses or ends.
 
+For new playback, Utidio records the media `play` intent before buffering completes. An explicit Play command in the popup has highest priority; otherwise a fresh intent in the active tab wins over delayed playback in a background tab. The later `playing` and tab-audible signals confirm playback but cannot let an older request take over.
+
 The popup’s **Listening time** view shows daily wall-clock totals. Overlapping playback counts once, totals use the computer’s local date, and media titles are not stored in the history. The extension checkpoints an active listening interval about once a minute.
 
 ## Permissions
