@@ -62,18 +62,50 @@ function ensureTabRecord(tabId, tab = {}) {
 
 async function pauseTab(tabId, bySentinel = false) {
   try {
-    await chrome.tabs.sendMessage(tabId, { action: ACTIONS.PAUSE });
+    const response = await controlTabMedia(tabId, 'pause');
+    if (!response.controlled) {
+      const tab = mediaTabs[String(tabId)];
+      if (tab) tab.controlError = 'Sound detected, but this player cannot be paused by the extension.';
+      return false;
+    }
   } catch (error) {
-    // The tab may not have an accessible content script. Its audibility is
-    // still tracked, but Chrome does not expose a general pause command.
+    const tab = mediaTabs[String(tabId)];
+    if (tab) tab.controlError = 'This tab cannot be controlled. Reload it and try again.';
+    return false;
   }
   const tab = mediaTabs[String(tabId)];
   if (tab) {
-    tab.isAudible = false;
-    tab.isPlaying = false;
     tab.pausedBySentinel = bySentinel;
     Object.values(tab.frames).forEach((frame) => { frame.isPlaying = false; });
+    refreshAggregate(tab);
   }
+}
+
+async function controlTabMedia(tabId, command) {
+  const frames = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: async (action) => {
+      const elements = Array.from(document.querySelectorAll('audio, video'));
+      if (action === 'pause') {
+        elements.forEach((element) => element.pause());
+        return { controlled: elements.length > 0, success: true };
+      }
+      const results = await Promise.allSettled(elements.map((element) => element.play()));
+      return {
+        controlled: elements.length > 0,
+        success: elements.length > 0 && results.every((result) => result.status === 'fulfilled'),
+        error: results.some((result) => result.status === 'rejected')
+          ? 'Playback needs a user gesture on the page.' : undefined,
+      };
+    },
+    args: [command],
+  });
+  const answers = frames.map((frame) => frame.result).filter(Boolean);
+  return {
+    controlled: answers.some((answer) => answer.controlled),
+    success: answers.some((answer) => answer.controlled && answer.success),
+    error: answers.find((answer) => answer.error)?.error,
+  };
 }
 
 async function activateTab(tabId) {
@@ -84,7 +116,7 @@ async function activateTab(tabId) {
     await pauseTab(previousId, true);
   }
   for (const tab of Object.values(mediaTabs)) {
-    if (tab.tabId !== tabId && tabIsPlaying(tab)) await pauseTab(tab.tabId, true);
+    if (tab.tabId !== tabId && tab.tabId !== previousId && tabIsPlaying(tab)) await pauseTab(tab.tabId, true);
   }
 }
 
@@ -113,10 +145,12 @@ async function syncOpenTab(tabInfo) {
     });
     const tab = ensureTabRecord(tabInfo.id, tabInfo);
     tab.isAudible = Boolean(tabInfo.audible);
+    const priorFrames = tab.frames;
+    tab.frames = {};
     for (const result of results) {
       if (!result || result.frameId === undefined || !result.result) continue;
       const key = String(result.frameId);
-      const prior = tab.frames[key] || {};
+      const prior = priorFrames[key] || {};
       const current = result.result;
       tab.frames[key] = {
         hasMedia: Boolean(current.hasMedia),
@@ -196,6 +230,8 @@ async function handleMessage(message, sender) {
     };
     refreshAggregate(tab);
     if (tab.isPlaying) {
+      tab.pausedBySentinel = false;
+      tab.controlError = '';
       tab.lastPlayedAt = Math.max(tab.lastPlayedAt || 0, tab.frames[frameId].lastPlayedAt || 0);
       if (enabled) await activateTab(tab.tabId);
     }
@@ -208,9 +244,10 @@ async function handleMessage(message, sender) {
   if (message.action === ACTIONS.TOGGLE_TAB && Number.isInteger(message.tabId)) {
     const tab = mediaTabs[String(message.tabId)];
     try {
-      await chrome.tabs.sendMessage(message.tabId, {
-        action: tabIsPlaying(tab) ? ACTIONS.PAUSE : ACTIONS.RESUME,
-      });
+      const result = await controlTabMedia(message.tabId, tabIsPlaying(tab) ? 'pause' : 'resume');
+      if (!result.controlled || !result.success) {
+        return { success: false, error: result.error || tab?.controlError || 'This player cannot be controlled from the page.' };
+      }
       return { success: true };
     } catch (error) {
       return { success: false, error: 'This tab cannot be controlled. Reload it and try again.' };
@@ -259,6 +296,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
       tab.isAudible = changeInfo.audible;
       refreshAggregate(tab);
       if (tab.isPlaying && enabled) await activateTab(tabId);
+      if (!tab.isPlaying && !Object.values(tab.frames).some((frame) => frame.hasMedia)) {
+        delete mediaTabs[String(tabId)];
+      }
       await persistMediaTabs();
     }
     if (changeInfo.title || changeInfo.favIconUrl || changeInfo.url) {

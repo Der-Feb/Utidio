@@ -37,39 +37,26 @@
     document.addEventListener(eventName, report, true);
   }
 
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === TAB_AUDIO_SENTINEL.actions.GET_MEDIA_STATUS) {
-      sendResponse(status());
-      return false;
-    }
-    if (message.action === TAB_AUDIO_SENTINEL.actions.PAUSE) {
-      mediaElements().forEach((element) => element.pause());
-      report();
-      sendResponse({ success: true });
-      return false;
-    }
-    if (message.action === TAB_AUDIO_SENTINEL.actions.RESUME) {
-      const elements = mediaElements();
-      Promise.allSettled(elements.map((element) => element.play())).then((results) => {
-        report();
-        const rejected = results.some((result) => result.status === 'rejected');
-        sendResponse({
-          success: !rejected,
-          error: rejected ? 'Playback needs a user gesture on the page.' : undefined,
-        });
-      });
-      return true;
-    }
-    return false;
-  });
-
   // Register media that existed before the content script was injected.
   report();
 
   // Keep the popup metadata fresh on single-page app title and URL changes.
-  const titleObserver = new MutationObserver(report);
-  const titleElement = document.querySelector('title');
-  if (titleElement) titleObserver.observe(titleElement, { childList: true, subtree: true, characterData: true });
+  const titleObserver = new MutationObserver((records) => {
+    if (records.some((record) => record.target.nodeName === 'TITLE'
+      || Array.from(record.addedNodes).some((node) => node.nodeName === 'TITLE'))) report();
+  });
+  if (document.documentElement) titleObserver.observe(document.documentElement, {
+    childList: true, subtree: true, characterData: true,
+  });
   addEventListener('popstate', report);
   addEventListener('hashchange', report);
+
+  const mediaObserver = new MutationObserver((records) => {
+    const mediaWasAdded = records.some((record) => Array.from(record.addedNodes).some((node) =>
+      node.nodeName === 'AUDIO' || node.nodeName === 'VIDEO' || node.querySelector?.('audio, video')));
+    if (mediaWasAdded) report();
+  });
+  if (document.documentElement) mediaObserver.observe(document.documentElement, {
+    childList: true, subtree: true,
+  });
 })();

@@ -50,6 +50,7 @@ h2 { margin: 14px 0 7px; color: #e2e8f0; font-size: 12px; text-transform: upperc
 .domain { overflow: hidden; margin-top: 3px; color: #cbd5e1; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .status { display: inline-block; margin-top: 4px; color: #bae6fd; font-size: 11px; }
 .status.paused { color: #e2e8f0; }
+.control-note { margin-top: 4px; color: #fecaca; font-size: 11px; }
 .actions { display: flex; flex: 0 0 auto; gap: 5px; }
 .action-btn { min-height: 30px; padding: 5px 8px; border: 1px solid #64748b; border-radius: 6px; background: #334155; color: #fff; font: inherit; font-size: 12px; cursor: pointer; }
 .action-btn:hover { background: #0c4a6e; }
@@ -68,6 +69,7 @@ h2 { margin: 14px 0 7px; color: #e2e8f0; font-size: 12px; text-transform: upperc
   .title { color: #0f172a; }
   .status { color: #075985; }
   .status.paused { color: #334155; }
+  .control-note { color: #991b1b; }
   .action-btn { border-color: #94a3b8; background: #e2e8f0; color: #0f172a; }
   .action-btn:hover { background: #bae6fd; }
   .favicon-fallback { background: #e2e8f0; color: #0f172a; }

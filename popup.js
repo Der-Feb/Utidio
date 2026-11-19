@@ -85,6 +85,12 @@
     status.className = `status${tab.isPlaying ? '' : ' paused'}`;
     status.textContent = tab.isPlaying ? 'Playing' : (tab.pausedBySentinel ? 'Paused by Sentinel' : 'Paused');
     details.append(titleElement, domainElement, status);
+    if (tab.controlError || (tab.isPlaying && !Object.values(tab.frames || {}).some((frame) => frame.hasMedia))) {
+      const controlNote = document.createElement('div');
+      controlNote.className = 'control-note';
+      controlNote.textContent = tab.controlError || 'Sound is detected, but this page does not expose pausable media.';
+      details.append(controlNote);
+    }
     card.append(details);
 
     const actions = document.createElement('div');
