@@ -26,12 +26,8 @@ Playback resumed from the popup may be blocked by a site’s autoplay policy. In
 
 ## Development checks
 
-The project has no package manager or automated test suite. Basic syntax and manifest checks can be run with:
+The project has no package manager or browser automation suite. Run the local package checks with:
 
 ```sh
-node --check background.js
-node --check content.js
-node --check constants.js
-node --check popup.js
-node -e "JSON.parse(require('fs').readFileSync('manifest.json', 'utf8'))"
+node scripts/check-extension.mjs
 ```
