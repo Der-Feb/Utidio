@@ -23,7 +23,7 @@
   function report() {
     try {
       if (!chrome.runtime?.id) return;
-      chrome.runtime.sendMessage({ action: ACTIONS.MEDIA_UPDATE, ...status() }, () => {
+      chrome.runtime.sendMessage({ action: TAB_AUDIO_SENTINEL.actions.MEDIA_UPDATE, ...status() }, () => {
         // Accessing lastError consumes the expected error after extension reload.
         void chrome.runtime.lastError;
       });
@@ -38,17 +38,17 @@
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === ACTIONS.GET_MEDIA_STATUS) {
+    if (message.action === TAB_AUDIO_SENTINEL.actions.GET_MEDIA_STATUS) {
       sendResponse(status());
       return false;
     }
-    if (message.action === ACTIONS.PAUSE) {
+    if (message.action === TAB_AUDIO_SENTINEL.actions.PAUSE) {
       mediaElements().forEach((element) => element.pause());
       report();
       sendResponse({ success: true });
       return false;
     }
-    if (message.action === ACTIONS.RESUME) {
+    if (message.action === TAB_AUDIO_SENTINEL.actions.RESUME) {
       const elements = mediaElements();
       Promise.allSettled(elements.map((element) => element.play())).then((results) => {
         report();
