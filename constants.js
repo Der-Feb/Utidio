@@ -1,0 +1,15 @@
+const ACTIONS = Object.freeze({
+  GET_STATUS: 'GET_STATUS',
+  SET_ENABLED: 'SET_ENABLED',
+  MEDIA_UPDATE: 'MEDIA_UPDATE',
+  GET_MEDIA_STATUS: 'GET_MEDIA_STATUS',
+  PAUSE: 'PAUSE',
+  RESUME: 'RESUME',
+  TOGGLE_TAB: 'TOGGLE_TAB',
+  FOCUS_TAB: 'FOCUS_TAB',
+});
+
+const STORAGE_KEYS = Object.freeze({
+  ENABLED: 'enabled',
+  MEDIA_TABS: 'mediaTabs',
+});

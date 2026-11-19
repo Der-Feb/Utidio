@@ -1,33 +1,195 @@
+let enabled = true;
+let mediaTabs = {};
 let activeTabId = null;
-let activeMediaInfo = {};
+let ready;
+let stateWrites = Promise.resolve();
+
+importScripts('constants.js');
+
+function persistMediaTabs() {
+  stateWrites = stateWrites
+    .catch(() => {})
+    .then(() => chrome.storage.session.set({ [STORAGE_KEYS.MEDIA_TABS]: mediaTabs }));
+  return stateWrites;
+}
+
+async function initializeState() {
+  const [settings, session] = await Promise.all([
+    chrome.storage.local.get(STORAGE_KEYS.ENABLED),
+    chrome.storage.session.get(STORAGE_KEYS.MEDIA_TABS),
+  ]);
+  enabled = settings[STORAGE_KEYS.ENABLED] ?? true;
+  mediaTabs = session[STORAGE_KEYS.MEDIA_TABS] ?? {};
+  const playing = Object.values(mediaTabs).filter((tab) => tab.isPlaying);
+  if (playing.length) {
+    activeTabId = playing.reduce((latest, tab) =>
+      (tab.lastPlayedAt || 0) > (latest.lastPlayedAt || 0) ? tab : latest,
+    ).tabId;
+  }
+}
+
+ready = initializeState();
+
+function tabIsPlaying(tab) {
+  return Boolean(tab && (tab.isAudible || Object.values(tab.frames || {}).some((frame) => frame.isPlaying)));
+}
+
+function ensureTabRecord(tabId, tab = {}) {
+  const key = String(tabId);
+  if (!mediaTabs[key]) {
+    mediaTabs[key] = {
+      tabId,
+      title: tab.title || 'Untitled media tab',
+      url: tab.url || '',
+      favIconUrl: tab.favIconUrl || '',
+      isAudible: Boolean(tab.audible),
+      isPlaying: Boolean(tab.audible),
+      lastPlayedAt: 0,
+      frames: {},
+      pausedBySentinel: false,
+    };
+  } else {
+    Object.assign(mediaTabs[key], {
+      title: tab.title || mediaTabs[key].title,
+      url: tab.url || mediaTabs[key].url,
+      favIconUrl: tab.favIconUrl || mediaTabs[key].favIconUrl,
+    });
+  }
+  return mediaTabs[key];
+}
+
+async function pauseTab(tabId, bySentinel = false) {
+  try {
+    await chrome.tabs.sendMessage(tabId, { action: ACTIONS.PAUSE });
+  } catch (error) {
+    // The tab may not have an accessible content script. Its audibility is
+    // still tracked, but Chrome does not expose a general pause command.
+  }
+  const tab = mediaTabs[String(tabId)];
+  if (tab) {
+    tab.isAudible = false;
+    tab.isPlaying = false;
+    tab.pausedBySentinel = bySentinel;
+    Object.values(tab.frames).forEach((frame) => { frame.isPlaying = false; });
+  }
+}
+
+async function activateTab(tabId) {
+  if (!enabled) return;
+  const previousId = activeTabId;
+  activeTabId = tabId;
+  if (previousId !== null && previousId !== tabId) {
+    await pauseTab(previousId, true);
+  }
+  for (const tab of Object.values(mediaTabs)) {
+    if (tab.tabId !== tabId && tabIsPlaying(tab)) await pauseTab(tab.tabId, true);
+  }
+}
+
+function refreshAggregate(tab) {
+  const wasPlaying = tab.isPlaying;
+  tab.isPlaying = tabIsPlaying(tab);
+  if (tab.isPlaying && !wasPlaying) tab.lastPlayedAt = Date.now();
+  if (!tab.isPlaying && activeTabId === tab.tabId) activeTabId = null;
+}
+
+async function handleMessage(message, sender) {
+  await ready;
+  if (message.action === ACTIONS.GET_STATUS) {
+    return { enabled, mediaTabs: Object.values(mediaTabs) };
+  }
+  if (message.action === ACTIONS.SET_ENABLED) {
+    enabled = Boolean(message.enabled);
+    await chrome.storage.local.set({ [STORAGE_KEYS.ENABLED]: enabled });
+    if (enabled) {
+      const candidates = Object.values(mediaTabs).filter(tabIsPlaying)
+        .sort((a, b) => (b.lastPlayedAt || 0) - (a.lastPlayedAt || 0));
+      activeTabId = candidates[0]?.tabId ?? null;
+      for (const tab of candidates.slice(1)) await pauseTab(tab.tabId, true);
+    }
+    await persistMediaTabs();
+    return { success: true, enabled };
+  }
+  if (message.action === ACTIONS.MEDIA_UPDATE && sender.tab) {
+    const tab = ensureTabRecord(sender.tab.id, sender.tab);
+    const frameId = String(sender.frameId ?? 0);
+    const prior = tab.frames[frameId] || {};
+    tab.frames[frameId] = {
+      hasMedia: Boolean(message.hasMedia),
+      isPlaying: Boolean(message.isPlaying),
+      title: message.title || prior.title || '',
+      url: message.url || prior.url || '',
+      lastPlayedAt: message.isPlaying && !prior.isPlaying ? Date.now() : (prior.lastPlayedAt || 0),
+    };
+    refreshAggregate(tab);
+    if (tab.isPlaying) {
+      tab.lastPlayedAt = Math.max(tab.lastPlayedAt || 0, tab.frames[frameId].lastPlayedAt || 0);
+      if (enabled) await activateTab(tab.tabId);
+    }
+    if (!tab.isPlaying && !tab.isAudible && !Object.values(tab.frames).some((frame) => frame.hasMedia)) {
+      delete mediaTabs[String(tab.tabId)];
+    }
+    await persistMediaTabs();
+    return { success: true };
+  }
+  if (message.action === ACTIONS.TOGGLE_TAB && Number.isInteger(message.tabId)) {
+    const tab = mediaTabs[String(message.tabId)];
+    try {
+      await chrome.tabs.sendMessage(message.tabId, {
+        action: tabIsPlaying(tab) ? ACTIONS.PAUSE : ACTIONS.RESUME,
+      });
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: 'This tab cannot be controlled. Reload it and try again.' };
+    }
+  }
+  if (message.action === ACTIONS.FOCUS_TAB && Number.isInteger(message.tabId)) {
+    await chrome.tabs.update(message.tabId, { active: true });
+    const tab = await chrome.tabs.get(message.tabId);
+    await chrome.windows.update(tab.windowId, { focused: true });
+    return { success: true };
+  }
+  return { success: false, error: 'Unknown action.' };
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  const tabId = sender.tab ? sender.tab.id : null;
-
-  if (message.action === "MEDIA_PLAYING" && tabId) {
-    // If a different tab starts playing, pause the previous one
-    if (activeTabId !== null && activeTabId !== tabId) {
-      chrome.tabs
-        .sendMessage(activeTabId, { action: "FORCE_PAUSE" })
-        .catch(() => {
-          // Tab might be closed or navigated away
-        });
-    }
-
-    activeTabId = tabId;
-    activeMediaInfo[tabId] = {
-      title: message.title,
-      url: message.url,
-      tabId: tabId,
-      isPlaying: true,
-    };
-  }
+  handleMessage(message, sender)
+    .then(sendResponse)
+    .catch((error) => sendResponse({ success: false, error: error.message }));
+  return true;
 });
 
-// Clean up state if a tab is closed
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (activeTabId === tabId) {
-    activeTabId = null;
-  }
-  delete activeMediaInfo[tabId];
+  void ready.then(async () => {
+    delete mediaTabs[String(tabId)];
+    if (activeTabId === tabId) activeTabId = null;
+    await persistMediaTabs();
+  });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
+  void ready.then(async () => {
+    const tab = mediaTabs[String(tabId)];
+    if (changeInfo.status === 'loading') {
+      delete mediaTabs[String(tabId)];
+      if (activeTabId === tabId) activeTabId = null;
+      await persistMediaTabs();
+      return;
+    }
+    if (!tab) return;
+    if (changeInfo.audible !== undefined) {
+      tab.isAudible = changeInfo.audible;
+      refreshAggregate(tab);
+      if (tab.isPlaying && enabled) await activateTab(tabId);
+      await persistMediaTabs();
+    }
+    if (changeInfo.title || changeInfo.favIconUrl || changeInfo.url) {
+      Object.assign(tab, {
+        title: tabInfo.title || tab.title,
+        url: tabInfo.url || tab.url,
+        favIconUrl: tabInfo.favIconUrl || tab.favIconUrl,
+      });
+      await persistMediaTabs();
+    }
+  });
 });

@@ -1,9 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "Utidio Tab Audio Sentinel",
+  "name": "Tab Audio Sentinel",
   "version": "1.0",
-  "description": "Ensures only one browser tab plays audio at a time.",
-  "permissions": ["tabs", "scripting", "activeTab"],
+  "description": "Ensures only one browser tab plays audio at a time and manages media streams.",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "activeTab",
+    "storage"
+  ],
   "background": {
     "service_worker": "background.js"
   },
