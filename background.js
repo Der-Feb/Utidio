@@ -5,6 +5,8 @@ let ready;
 let stateWrites = Promise.resolve();
 
 importScripts('constants.js');
+const ACTIONS = TAB_AUDIO_SENTINEL.actions;
+const STORAGE_KEYS = TAB_AUDIO_SENTINEL.storageKeys;
 
 function persistMediaTabs() {
   stateWrites = stateWrites
@@ -28,7 +30,7 @@ async function initializeState() {
   }
 }
 
-ready = initializeState();
+ready = initializeState().then(refreshOpenTabs);
 
 function tabIsPlaying(tab) {
   return Boolean(tab && (tab.isAudible || Object.values(tab.frames || {}).some((frame) => frame.isPlaying)));
@@ -86,6 +88,72 @@ async function activateTab(tabId) {
   }
 }
 
+function isInjectableUrl(url = '') {
+  return /^(https?|file):\/\//i.test(url);
+}
+
+async function syncOpenTab(tabInfo) {
+  if (!tabInfo?.id || !isInjectableUrl(tabInfo.url)) return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tabInfo.id, allFrames: true },
+      files: ['constants.js', 'content.js'],
+    });
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tabInfo.id, allFrames: true },
+      func: () => {
+        const elements = Array.from(document.querySelectorAll('audio, video'));
+        return {
+          hasMedia: elements.length > 0,
+          isPlaying: elements.some((element) => !element.paused && !element.ended && !element.muted && element.volume > 0),
+          title: document.title,
+          url: location.href,
+        };
+      },
+    });
+    const tab = ensureTabRecord(tabInfo.id, tabInfo);
+    tab.isAudible = Boolean(tabInfo.audible);
+    for (const result of results) {
+      if (!result || result.frameId === undefined || !result.result) continue;
+      const key = String(result.frameId);
+      const prior = tab.frames[key] || {};
+      const current = result.result;
+      tab.frames[key] = {
+        hasMedia: Boolean(current.hasMedia),
+        isPlaying: Boolean(current.isPlaying),
+        title: current.title || '',
+        url: current.url || '',
+        lastPlayedAt: current.isPlaying ? (prior.lastPlayedAt || Date.now()) : (prior.lastPlayedAt || 0),
+      };
+    }
+    refreshAggregate(tab);
+    if (tab.isPlaying && !tab.lastPlayedAt) tab.lastPlayedAt = Date.now();
+    if (!tab.isPlaying && !Object.values(tab.frames).some((frame) => frame.hasMedia)) {
+      delete mediaTabs[String(tabInfo.id)];
+    }
+  } catch (error) {
+    // Chrome-managed and restricted pages cannot be inspected or injected.
+  }
+}
+
+async function refreshOpenTabs() {
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) await syncOpenTab(tab);
+  const candidates = Object.values(mediaTabs).filter(tabIsPlaying);
+  if (enabled && candidates.length > 1) {
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const winner = candidates.find((tab) => tab.tabId === active?.id)
+      || candidates.reduce((latest, tab) => (tab.lastPlayedAt || 0) > (latest.lastPlayedAt || 0) ? tab : latest);
+    activeTabId = winner.tabId;
+    for (const tab of candidates) {
+      if (tab.tabId !== winner.tabId) await pauseTab(tab.tabId, true);
+    }
+  } else if (candidates.length) {
+    activeTabId = candidates[0].tabId;
+  }
+  await persistMediaTabs();
+}
+
 function refreshAggregate(tab) {
   const wasPlaying = tab.isPlaying;
   tab.isPlaying = tabIsPlaying(tab);
@@ -102,8 +170,13 @@ async function handleMessage(message, sender) {
     enabled = Boolean(message.enabled);
     await chrome.storage.local.set({ [STORAGE_KEYS.ENABLED]: enabled });
     if (enabled) {
+      await refreshOpenTabs();
       const candidates = Object.values(mediaTabs).filter(tabIsPlaying)
         .sort((a, b) => (b.lastPlayedAt || 0) - (a.lastPlayedAt || 0));
+      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (active && candidates.some((tab) => tab.tabId === active.id)) {
+        candidates.sort((a, b) => Number(b.tabId === active.id) - Number(a.tabId === active.id));
+      }
       activeTabId = candidates[0]?.tabId ?? null;
       for (const tab of candidates.slice(1)) await pauseTab(tab.tabId, true);
     }
@@ -169,14 +242,19 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
   void ready.then(async () => {
-    const tab = mediaTabs[String(tabId)];
+    let tab = mediaTabs[String(tabId)];
     if (changeInfo.status === 'loading') {
       delete mediaTabs[String(tabId)];
       if (activeTabId === tabId) activeTabId = null;
       await persistMediaTabs();
       return;
     }
-    if (!tab) return;
+    if (!tab && changeInfo.audible) tab = ensureTabRecord(tabId, tabInfo);
+    if (!tab) {
+      if (changeInfo.status === 'complete') await syncOpenTab(tabInfo);
+      await persistMediaTabs();
+      return;
+    }
     if (changeInfo.audible !== undefined) {
       tab.isAudible = changeInfo.audible;
       refreshAggregate(tab);
@@ -191,5 +269,18 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
       });
       await persistMediaTabs();
     }
+    if (changeInfo.status === 'complete') {
+      await syncOpenTab(tabInfo);
+      if (enabled && mediaTabs[String(tabId)]?.isPlaying) await activateTab(tabId);
+      await persistMediaTabs();
+    }
   });
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  void ready.then(refreshOpenTabs);
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void ready.then(refreshOpenTabs);
 });
