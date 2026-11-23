@@ -252,8 +252,14 @@ async function activateTab(tabId, priorityOverride, intentAtOverride) {
   const winner = mediaTabs[String(activeTabId)];
   const winnerStillPlaying = tabIsPlaying(winner);
   const isCurrentWinner = activeTabId === tabId;
+  const explicitWinnerIsFresh = activePriority === 4 && Date.now() - activeIntentAt <= 5000;
+  const candidateExplicitIsFresh = priority === 4 && Date.now() - intentAt <= 5000;
+  const newerUserIntent = priority >= 2 && intentAt > activeIntentAt;
   const takesPriority = isCurrentWinner || activeTabId === null || !winnerStillPlaying
-    || priority > activePriority || (priority === activePriority && intentAt >= activeIntentAt);
+    || candidateExplicitIsFresh
+    || (explicitWinnerIsFresh && priority === 4 && intentAt >= activeIntentAt)
+    || (!explicitWinnerIsFresh && newerUserIntent)
+    || (intentAt === activeIntentAt && priority > activePriority);
 
   if (!takesPriority) {
     if (tabIsPlaying(tab)) await pauseTab(tabId, true);
