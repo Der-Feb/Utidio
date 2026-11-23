@@ -168,7 +168,7 @@
     else playingList.append(makeEmpty('Nothing is playing right now.'));
 
     if (paused.length) paused.forEach((tab) => pausedList.append(makeCard(tab)));
-    else pausedList.append(makeEmpty('Paused media tabs will appear here.'));
+    else pausedList.append(makeEmpty('Paused or muted media tabs will appear here.'));
   }
 
   function localTodayKey() {

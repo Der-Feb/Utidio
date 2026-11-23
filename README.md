@@ -1,6 +1,6 @@
 # Utidio
 
-Utidio follows the rule “One plays. Others pause.” When media starts in one tab, it automatically pauses ordinary HTML audio and video in other tabs. Its popup lists playing and paused media tabs, lets you control playback, and shows daily listening time.
+Utidio follows the rule “One plays. Others pause.” When media starts in one tab, it automatically pauses ordinary HTML audio and video in other tabs. Its popup lists playing and paused media tabs, lets you control playback and player mute state, and shows daily listening time.
 
 ## Install locally
 
@@ -12,6 +12,8 @@ Utidio follows the rule “One plays. Others pause.” When media starts in one 
 The extension also scans already-open, accessible tabs on install and whenever automatic pausing is enabled again. If more than one tab is already playing, it keeps the active tab playing when possible; otherwise it keeps the most recently observed playing tab. It does not automatically resume a tab when another one pauses or ends.
 
 For new playback, Utidio records the media `play` intent before buffering completes. An explicit Play command in the popup has highest priority; otherwise a fresh intent in the active tab wins over delayed playback in a background tab. The later `playing` and tab-audible signals confirm playback but cannot let an older request take over.
+
+Use **Mute** to mute page-visible media players without muting the whole Chrome tab. The popup labels media that is still running while muted. **Unmute** is an explicit request to hear that tab and takes priority over passive playback signals. Sites may control or override their media elements, and media without a page-visible audio/video element cannot be muted through the player.
 
 The popup’s **Listening time** view shows daily wall-clock totals. Overlapping playback counts once, totals use the computer’s local date, and media titles are not stored in the history. The extension checkpoints an active listening interval about once a minute.
 
@@ -26,6 +28,8 @@ The popup’s **Listening time** view shows daily wall-clock totals. Overlapping
 ## Limits
 
 Chrome reports whether a tab is audible, including sound from Web Audio and players that do not use a page-visible `<audio>` or `<video>` element. The extension can pause page-visible audio and video. When sound is detected but the page exposes no pausable media element, the extension reports that it could not control the player; it does not silently mute the tab.
+
+The browser's audible flag is tab-wide, so Utidio cannot reliably identify which player produced a tab's sound. A tab may contain more than one player; popup controls currently act on the tab's page-visible media together. Utidio coordinates playback between tabs and does not arbitrate between players within one tab. A playing video with no audio track may also appear active when its page reports media playback before Chrome reports audibility.
 
 Playback resumed from the popup may be blocked by a site’s autoplay policy. In that case, start playback from the page itself. Calls and other real-time audio are not automatically excluded; use the master switch when you do not want competing audio paused.
 
