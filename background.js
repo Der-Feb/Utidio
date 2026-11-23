@@ -35,7 +35,7 @@ async function initializeState() {
     activeIntentAt = session.winner.intentAt || 0;
   }
   if (listeningSince !== null) chrome.alarms.create(LISTENING_ALARM, { periodInMinutes: 1 });
-  const playing = Object.values(mediaTabs).filter((tab) => tab.isPlaying);
+  const playing = Object.values(mediaTabs).filter(tabIsAudible);
   if (playing.length) {
     activeTabId = playing.reduce((latest, tab) =>
       (tab.lastPlayedAt || 0) > (latest.lastPlayedAt || 0) ? tab : latest,
@@ -48,14 +48,23 @@ ready = initializeState().then(refreshOpenTabs);
 function tabIsPlaying(tab) {
   if (!tab) return false;
   const frameIsPlaying = Object.values(tab.frames || {}).some((frame) => frame.isPlaying);
-  const suppressAudible = (tab.pauseRequestedUntil && Date.now() <= tab.pauseRequestedUntil)
-    || (tab.muteRequestedUntil && Date.now() <= tab.muteRequestedUntil);
-  if (suppressAudible && !frameIsPlaying) return false;
   return Boolean(tab.isAudible || frameIsPlaying);
 }
 
+// Page media can be in its playing state without producing sound (for example,
+// a silent video). Only Chrome's tab-level audible signal may arbitrate tabs or
+// contribute to listening time.
+function tabIsAudible(tab) {
+  if (!tab) return false;
+  const suppressAudible = (tab.pauseRequestedUntil && Date.now() <= tab.pauseRequestedUntil)
+    || (tab.muteRequestedUntil && Date.now() <= tab.muteRequestedUntil);
+  const mediaIsPlaying = Object.values(tab.frames || {}).some((frame) => frame.isPlaying);
+  if (suppressAudible && !mediaIsPlaying) return false;
+  return Boolean(tab.isAudible);
+}
+
 function anyTabIsPlaying() {
-  return Object.values(mediaTabs).some(tabIsPlaying);
+  return Object.values(mediaTabs).some(tabIsAudible);
 }
 
 function localDateKey(timestamp) {
@@ -237,13 +246,13 @@ async function activateTab(tabId, priorityOverride, intentAtOverride) {
     : (tab?.playIntentPriority || 1));
   const intentAt = intentAtOverride ?? tab?.playIntentAt ?? Date.now();
   const winner = mediaTabs[String(activeTabId)];
-  const winnerStillPlaying = tabIsPlaying(winner);
+  const winnerStillPlaying = tabIsAudible(winner);
   const isCurrentWinner = activeTabId === tabId;
   const takesPriority = isCurrentWinner || activeTabId === null || !winnerStillPlaying
     || priority > activePriority || (priority === activePriority && intentAt >= activeIntentAt);
 
   if (!takesPriority) {
-    if (tabIsPlaying(tab)) await pauseTab(tabId, true);
+    if (tabIsAudible(tab)) await pauseTab(tabId, true);
     return false;
   }
 
@@ -255,7 +264,7 @@ async function activateTab(tabId, priorityOverride, intentAtOverride) {
     await chrome.storage.session.set({ winner: { tabId, priority, intentAt } });
   }
   for (const otherTab of Object.values(mediaTabs)) {
-    if (otherTab.tabId !== tabId && tabIsPlaying(otherTab)) await pauseTab(otherTab.tabId, true);
+    if (otherTab.tabId !== tabId && tabIsAudible(otherTab)) await pauseTab(otherTab.tabId, true);
   }
   return true;
 }
@@ -332,7 +341,7 @@ async function syncOpenTab(tabInfo) {
 async function refreshOpenTabs() {
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) await syncOpenTab(tab);
-  const candidates = Object.values(mediaTabs).filter(tabIsPlaying);
+  const candidates = Object.values(mediaTabs).filter(tabIsAudible);
   if (enabled && candidates.length) {
     const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const winner = candidates.find((tab) => tab.tabId === active?.id)
@@ -379,7 +388,7 @@ async function handleMessage(message, sender) {
     await chrome.storage.local.set({ [STORAGE_KEYS.ENABLED]: enabled });
     if (enabled) {
       await refreshOpenTabs();
-      const candidates = Object.values(mediaTabs).filter(tabIsPlaying)
+      const candidates = Object.values(mediaTabs).filter(tabIsAudible)
         .sort((a, b) => (b.lastPlayedAt || 0) - (a.lastPlayedAt || 0));
       const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       if (active && candidates.some((tab) => tab.tabId === active.id)) {
@@ -402,7 +411,7 @@ async function handleMessage(message, sender) {
       ? 4
       : (active?.id === sender.tab.id ? 3 : 2);
     tab.hasUserActivation = Boolean(message.hasUserActivation);
-    if (enabled && Object.values(tab.frames).some((frame) => frame.isPlaying)) {
+    if (enabled && tabIsAudible(tab)) {
       await activateTab(tab.tabId, tab.playIntentPriority, tab.playIntentAt);
     }
     await persistMediaTabs();
@@ -430,7 +439,7 @@ async function handleMessage(message, sender) {
       tab.pausedBySentinel = false;
       tab.controlError = '';
       tab.lastPlayedAt = Math.max(tab.lastPlayedAt || 0, tab.frames[frameId].lastPlayedAt || 0);
-      if (enabled) {
+      if (enabled && tabIsAudible(tab)) {
         const intent = await getTabPlayIntent(tab.tabId);
         await activateTab(tab.tabId, intent.priority, intent.intentAt);
       }
@@ -547,7 +556,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
       refreshAggregate(tab);
       await syncListeningClock();
       const pauseIsPending = tab.pauseRequestedUntil && Date.now() <= tab.pauseRequestedUntil;
-      if (changeInfo.audible && tab.isPlaying && enabled && !pauseIsPending) {
+      if (changeInfo.audible && tabIsAudible(tab) && enabled && !pauseIsPending) {
         const intent = await getTabPlayIntent(tabId);
         await activateTab(tabId, intent.priority, intent.intentAt);
       }
@@ -579,7 +588,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
 chrome.tabs.onActivated.addListener(({ tabId }) => {
   void ready.then(async () => {
     const tab = mediaTabs[String(tabId)];
-    if (enabled && tabIsPlaying(tab)) {
+    if (enabled && tabIsAudible(tab)) {
       await activateTab(tabId, 3, Date.now());
       await persistMediaTabs();
     }
