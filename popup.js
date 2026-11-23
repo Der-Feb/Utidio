@@ -93,7 +93,10 @@
     domainElement.title = tab.url || '';
     const status = document.createElement('span');
     status.className = `status${tab.isPlaying ? '' : ' paused'}`;
-    status.textContent = tab.isPlaying ? 'Playing' : (tab.pausedBySentinel ? 'Paused by Sentinel' : 'Paused');
+    const playingMuted = !tab.isPlaying && tab.isPlaybackRunning && tab.hasMutedMedia;
+    status.textContent = tab.isPlaying ? 'Playing' : (playingMuted ? 'Playing muted'
+      : (tab.pausedBySentinel ? 'Paused by Utidio' : 'Paused'));
+    if (playingMuted) status.classList.add('muted');
     details.append(titleElement, domainElement, status);
     if (tab.controlError || (tab.isPlaying && !Object.values(tab.frames || {}).some((frame) => frame.hasMedia))) {
       const controlNote = document.createElement('div');
@@ -131,6 +134,22 @@
       const response = await send({ action: ACTIONS.FOCUS_TAB, tabId: tab.tabId });
       if (!response?.success) setNotice(response?.error || 'Could not switch to that tab.');
     });
+    const canMute = tab.isPlaying || tab.hasMutedMedia;
+    if (canMute) {
+      const muteButton = document.createElement('button');
+      muteButton.className = 'action-btn';
+      muteButton.type = 'button';
+      muteButton.textContent = tab.isPlaying ? 'Mute' : 'Unmute';
+      muteButton.setAttribute('aria-label', `${tab.isPlaying ? 'Mute' : 'Unmute'} media in ${title}`);
+      muteButton.addEventListener('click', async () => {
+        muteButton.disabled = true;
+        const response = await send({ action: ACTIONS.SET_MEDIA_MUTED, tabId: tab.tabId, muted: tab.isPlaying });
+        const error = response?.success ? '' : (response?.error || 'Could not change player mute state.');
+        await refresh();
+        if (error) setNotice(error);
+      });
+      actions.append(muteButton);
+    }
     actions.append(mediaButton, focusButton);
     card.append(actions);
     return card;

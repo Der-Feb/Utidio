@@ -66,6 +66,7 @@ h2 { margin: 14px 0 7px; color: var(--navy); font-size: 11px; text-transform: up
 .domain { overflow: hidden; margin-top: 3px; color: var(--silver-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .status { display: inline-flex; align-items: center; margin-top: 5px; padding: 3px 7px; border-radius: 999px; background: var(--gold); color: var(--navy-deep); font-size: 10px; font-weight: 700; }
 .status.paused { background: #bcc1ce; color: var(--navy); }
+.status.muted { background: #d9cbed; color: #382858; }
 .control-note { margin-top: 4px; color: var(--error-on-dark); font-size: 11px; }
 .actions { display: flex; flex: 0 0 auto; gap: 5px; }
 .action-btn { min-height: 30px; padding: 5px 8px; border: 1px solid var(--silver-muted); border-radius: 6px; background: var(--silver); color: var(--navy); font: inherit; font-size: 12px; cursor: pointer; }

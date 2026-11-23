@@ -6,15 +6,27 @@
     return Array.from(document.querySelectorAll('audio, video'));
   }
 
+  function mutedByUtidioSet() {
+    globalThis.__utidioMutedMediaElements ||= new WeakSet();
+    return globalThis.__utidioMutedMediaElements;
+  }
+
   function isPlaying(element) {
     return !element.paused && !element.ended && !element.muted && element.volume > 0;
   }
 
   function status() {
     const elements = mediaElements();
+    const mutedByUtidio = mutedByUtidioSet();
+    for (const element of elements) {
+      if (!element.muted) mutedByUtidio.delete(element);
+    }
     return {
       hasMedia: elements.length > 0,
       isPlaying: elements.some(isPlaying),
+      isPlaybackRunning: elements.some((element) => !element.paused && !element.ended),
+      hasMutedMedia: elements.some((element) => element.muted),
+      mutedByUtidio: elements.filter((element) => element.muted && mutedByUtidio.has(element)).length,
       title: document.title,
       url: location.href,
     };

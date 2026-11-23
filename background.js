@@ -48,7 +48,9 @@ ready = initializeState().then(refreshOpenTabs);
 function tabIsPlaying(tab) {
   if (!tab) return false;
   const frameIsPlaying = Object.values(tab.frames || {}).some((frame) => frame.isPlaying);
-  if (tab.pauseRequestedUntil && Date.now() <= tab.pauseRequestedUntil && !frameIsPlaying) return false;
+  const suppressAudible = (tab.pauseRequestedUntil && Date.now() <= tab.pauseRequestedUntil)
+    || (tab.muteRequestedUntil && Date.now() <= tab.muteRequestedUntil);
+  if (suppressAudible && !frameIsPlaying) return false;
   return Boolean(tab.isAudible || frameIsPlaying);
 }
 
@@ -125,6 +127,9 @@ function ensureTabRecord(tabId, tab = {}) {
       lastPlayedAt: 0,
       frames: {},
       pausedBySentinel: false,
+      isPlaybackRunning: false,
+      hasMutedMedia: false,
+      mutedByUtidio: 0,
     };
   } else {
     Object.assign(mediaTabs[key], {
@@ -175,9 +180,36 @@ async function controlTabMedia(tabId, command) {
     target: { tabId, allFrames: true },
     func: async (action) => {
       const elements = Array.from(document.querySelectorAll('audio, video'));
+      globalThis.__utidioMutedMediaElements ||= new WeakSet();
+      const mutedByUtidio = globalThis.__utidioMutedMediaElements;
       if (action === 'pause') {
         elements.forEach((element) => element.pause());
         return { controlled: elements.length > 0, success: true };
+      }
+      if (action === 'mute') {
+        const targets = elements.filter((element) => !element.paused && !element.ended
+          && !element.muted && element.volume > 0);
+        targets.forEach((element) => {
+          mutedByUtidio.add(element);
+          element.muted = true;
+        });
+        return {
+          controlled: targets.length > 0,
+          success: targets.length > 0,
+          error: targets.length ? undefined : 'No unmuted playing media was found in this tab.',
+        };
+      }
+      if (action === 'unmute') {
+        const targets = elements.filter((element) => element.muted);
+        targets.forEach((element) => {
+          mutedByUtidio.delete(element);
+          element.muted = false;
+        });
+        return {
+          controlled: targets.length > 0,
+          success: targets.length > 0,
+          error: targets.length ? undefined : 'No muted media was found in this tab.',
+        };
       }
       const results = await Promise.allSettled(elements.map((element) => element.play()));
       return {
@@ -258,6 +290,10 @@ async function syncOpenTab(tabInfo) {
         return {
           hasMedia: elements.length > 0,
           isPlaying: elements.some((element) => !element.paused && !element.ended && !element.muted && element.volume > 0),
+          isPlaybackRunning: elements.some((element) => !element.paused && !element.ended),
+          hasMutedMedia: elements.some((element) => element.muted),
+          mutedByUtidio: elements.filter((element) => element.muted
+            && globalThis.__utidioMutedMediaElements?.has(element)).length,
           title: document.title,
           url: location.href,
         };
@@ -275,6 +311,9 @@ async function syncOpenTab(tabInfo) {
       tab.frames[key] = {
         hasMedia: Boolean(current.hasMedia),
         isPlaying: Boolean(current.isPlaying),
+        isPlaybackRunning: Boolean(current.isPlaybackRunning),
+        hasMutedMedia: Boolean(current.hasMutedMedia),
+        mutedByUtidio: Number(current.mutedByUtidio) || 0,
         title: current.title || '',
         url: current.url || '',
         lastPlayedAt: current.isPlaying ? (prior.lastPlayedAt || Date.now()) : (prior.lastPlayedAt || 0),
@@ -312,6 +351,10 @@ async function refreshOpenTabs() {
 
 function refreshAggregate(tab) {
   const wasPlaying = tab.isPlaying;
+  const frames = Object.values(tab.frames || {});
+  tab.isPlaybackRunning = frames.some((frame) => frame.isPlaybackRunning);
+  tab.hasMutedMedia = frames.some((frame) => frame.hasMutedMedia);
+  tab.mutedByUtidio = frames.reduce((count, frame) => count + (frame.mutedByUtidio || 0), 0);
   tab.isPlaying = tabIsPlaying(tab);
   if (tab.isPlaying && !wasPlaying) tab.lastPlayedAt = Date.now();
   if (!tab.isPlaying && activeTabId === tab.tabId) {
@@ -372,6 +415,9 @@ async function handleMessage(message, sender) {
     tab.frames[frameId] = {
       hasMedia: Boolean(message.hasMedia),
       isPlaying: Boolean(message.isPlaying),
+      isPlaybackRunning: Boolean(message.isPlaybackRunning),
+      hasMutedMedia: Boolean(message.hasMutedMedia),
+      mutedByUtidio: Number(message.mutedByUtidio) || 0,
       title: message.title || prior.title || '',
       url: message.url || prior.url || '',
       lastPlayedAt: message.isPlaying && !prior.isPlaying ? Date.now() : (prior.lastPlayedAt || 0),
@@ -415,6 +461,31 @@ async function handleMessage(message, sender) {
       }
       return { success: true };
     } catch (error) {
+      return { success: false, error: 'This tab cannot be controlled. Reload it and try again.' };
+    }
+  }
+  if (message.action === ACTIONS.SET_MEDIA_MUTED && Number.isInteger(message.tabId)) {
+    const tab = mediaTabs[String(message.tabId)];
+    const shouldMute = Boolean(message.muted);
+    if (tab) tab.muteRequestedUntil = Date.now() + 3000;
+    try {
+      const result = await controlTabMedia(message.tabId, shouldMute ? 'mute' : 'unmute');
+      if (!result.controlled || !result.success) {
+        if (tab) delete tab.muteRequestedUntil;
+        return { success: false, error: result.error || 'No controllable media player was found.' };
+      }
+      if (!shouldMute) {
+        if (tab) {
+          tab.explicitPlayUntil = Date.now() + 5000;
+          tab.playIntentAt = Date.now();
+          tab.playIntentPriority = 4;
+        }
+        await activateTab(message.tabId, 4, Date.now());
+      }
+      if (tab) await persistMediaTabs();
+      return { success: true };
+    } catch (error) {
+      if (tab) delete tab.muteRequestedUntil;
       return { success: false, error: 'This tab cannot be controlled. Reload it and try again.' };
     }
   }
