@@ -555,7 +555,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tabInfo) => {
     }
     if (!tab && changeInfo.audible) tab = ensureTabRecord(tabId, tabInfo);
     if (!tab) {
-      if (changeInfo.status === 'complete') await syncOpenTab(tabInfo);
+      if (changeInfo.status === 'complete') {
+        await syncOpenTab(tabInfo);
+        const refreshedTab = mediaTabs[String(tabId)];
+        if (enabled && tabIsPlaying(refreshedTab)) {
+          const intent = await getTabPlayIntent(tabId);
+          await activateTab(tabId, intent.priority, intent.intentAt);
+        }
+      }
       await syncListeningClock();
       await persistMediaTabs();
       return;
