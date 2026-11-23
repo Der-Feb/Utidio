@@ -9,6 +9,7 @@ let activePriority = 0;
 let activeIntentAt = 0;
 
 importScripts('constants.js');
+console.log(`[Utidio] Service worker started. Version ${chrome.runtime.getManifest().version}`);
 const ACTIONS = TAB_AUDIO_SENTINEL.actions;
 const STORAGE_KEYS = TAB_AUDIO_SENTINEL.storageKeys;
 const LISTENING_ALARM = TAB_AUDIO_SENTINEL.listeningAlarm;
